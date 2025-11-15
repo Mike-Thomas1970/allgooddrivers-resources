@@ -1,0 +1,394 @@
+<!-- Font -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  .page-wrapper {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .form-column {
+    width: 40%;
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    box-sizing: border-box;
+  }
+
+  .map-column {
+    width: 60%;
+    height: 100vh;
+  }
+
+  .heading {
+    font-family: "Share", arial, sans-serif;
+    font-size: 40px;
+    color: rgb(27, 27, 27);
+  }
+
+  .info,
+  .label,
+  .text-field,
+  .button-container a,
+  .error,
+  #message {
+    font-family: "Share", arial, sans-serif;
+  }
+
+  .info {
+    font-size: 20px;
+    color: rgb(94, 94, 94);
+  }
+
+  .label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 20px;
+    color: rgb(27, 27, 27);
+  }
+
+  .text-field {
+    width: 100%;
+    padding: 10px;
+    font-size: 18px;
+    border: 1px solid rgb(27, 27, 27);
+    margin-bottom: 20px;
+  }
+
+  .error {
+    color: rgb(150,40,40);
+  }
+
+  .button-container {
+    text-align: center;
+  }
+
+  .button-container a {
+    font-size: 24px;
+    font-weight: 700;
+    text-decoration: none;
+    background-color: rgb(94, 94, 94);
+    color: white;
+    padding: 12px 24px;
+    display: inline-block;
+  }
+
+  .button-container a.active {
+    background-color: rgb(209, 128, 0);
+  }
+
+  .button-container a:not(.active) {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  #map {
+    width: 100%;
+    height: 100%;
+  }
+
+  @media (max-width: 768px) {
+    .page-wrapper {
+      flex-direction: column;
+    }
+
+    .form-column, .map-column {
+      width: 100%;
+      height: auto;
+    }
+
+    .map-column {
+      height: 400px; /* set a fixed height for map on mobile */
+    }
+  }
+
+</style>
+
+<div class="page-wrapper">
+  <div class="form-column">
+    <p class="info">
+      Please enter a preferred pickup and dropoff location for your lesson to see availability for your area.
+    </p>
+
+    <div id="pickup-container">
+      <label for="pickup-field" class="label">Pickup Location</label>
+      <input id="pickup-field" type="text" class="text-field" placeholder="Enter pickup address" />
+      <div class="error" id="pickup-field-error"></div>
+    </div>
+
+    <label style="display: flex; align-items: center; gap: 10px; font-size: 18px; font-family: 'Share', arial, sans-serif;">
+      <input type="checkbox" id="same-location-toggle" />
+      My pickup and dropoff location are the same
+    </label>
+
+    <div id="dropoff-container">
+      <label for="dropoff-field" class="label">Dropoff Location</label>
+      <input id="dropoff-field" type="text" class="text-field" placeholder="Enter dropoff address"/>
+      <div class="error" id="dropoff-field-error"></div>
+    </div>
+    <p id="message" class="info"></p>
+
+    <div class="button-container">
+      <a href="#" id="schedule-button">Click Here to Check Availability/Schedule</a>
+    </div>
+  </div>
+
+  <div class="map-column">
+    <div id="map"></div>
+  </div>
+</div>
+
+<!-- Load Google Maps Places API with callback -->
+<script>
+  let pickupLocation = null;
+  let dropoffLocation = null;
+  let map;
+  let zonePolygons = {};
+  let mapPolygons = {};
+  let timetapLinks = {};
+  let pickupMarker = null;
+  let dropoffMarker = null;
+
+  const ZONE_JSON_URL = 'https://raw.githubusercontent.com/Mike-Thomas1970/allgooddrivers-resources/main/area_maps.json';
+
+  async function loadZones() {
+    const res = await fetch(ZONE_JSON_URL);
+    const geojson = await res.json();
+
+    geojson.features.forEach((feature) => {
+      const name = feature.properties.name || feature.properties.Zone || "Unnamed";
+      const coords = feature.geometry.coordinates[0]; // assumes Polygon
+      const latlngs = coords.map(([lng, lat]) => ({ lat, lng }));
+
+      zonePolygons[name] = latlngs;
+      timetapLinks[name] = feature.properties.timetap_url;
+
+      const polygon = new google.maps.Polygon({
+        paths: latlngs,
+        strokeColor: feature.properties["stroke"],
+        strokeOpacity: feature.properties["stroke-opacity"],
+        strokeWeight: feature.properties["stroke-width"],
+        fillColor: feature.properties["fill"],
+        fillOpacity: feature.properties["fill-opacity"],
+        map: map,
+      });
+
+      mapPolygons[name] = polygon;
+    });
+
+    console.log("Zones loaded.");
+  }
+
+  function getZone(latLng) {
+    for (const [zoneName, polygon] of Object.entries(mapPolygons)) {
+      if (google.maps.geometry.poly.containsLocation(latLng, polygon)) {
+        return zoneName;
+      }
+    }
+    return null;
+  }
+
+  function highlightZone(zoneName) {
+    Object.entries(mapPolygons).forEach(([name, poly]) => {
+      poly.setOptions({
+        strokeWeight: name === zoneName ? 4 : 1,
+        fillOpacity: name === zoneName ? 0.3 : 0.15,
+      });
+    });
+  }
+
+  function placeMarker(id, location) {
+    const marker = new google.maps.Marker({
+      position: location,
+      map: map,
+      label: id === "pickup-field" ? "P" : "D"
+    });
+
+    if (id === "pickup-field") {
+      if (pickupMarker) pickupMarker.setMap(null);
+      pickupMarker = marker;
+    } else {
+      if (dropoffMarker) dropoffMarker.setMap(null);
+      dropoffMarker = marker;
+    }
+
+    map.panTo(location);
+    map.setZoom(13);
+  }
+
+  function updateMessage(valid = true) {
+    const pickupZone = document.getElementById("pickup-field").getAttribute("zone");
+    const dropoffZone = document.getElementById("dropoff-field").getAttribute("zone");
+    const messageElement = document.getElementById("message");
+    const buttonElement = document.getElementById("schedule-button");
+    const sameLocationCheckbox = document.getElementById("same-location-toggle");
+    const useSameLocation = sameLocationCheckbox.checked;
+    
+
+    if(valid) {
+      if(useSameLocation) {
+        if (pickupZone) {
+            messageElement.innerHTML = `✅ Your zone is <strong>${pickupZone}</strong>`;
+            setButtonHref();
+            buttonElement.classList.add("active");
+        } else {
+          messageElement.innerHTML = "";
+          buttonElement.setAttribute("href", "#");
+          buttonElement.classList.remove("active");
+        }
+      }
+      else {
+        if (pickupZone && dropoffZone) {
+          if (pickupZone === dropoffZone) {
+            messageElement.innerHTML = `✅ Your zone is <strong>${pickupZone}</strong>`;
+            setButtonHref();
+            buttonElement.classList.add("active");
+          } else {
+            messageElement.innerHTML = "❌ Pickup and dropoff zones are different. Please select a pickup and dropoff location in the same zone.";
+            buttonElement.setAttribute("href", "#");
+            buttonElement.classList.remove("active");
+          }
+        } else {
+          messageElement.innerHTML = "";
+          buttonElement.setAttribute("href", "#");
+          buttonElement.classList.remove("active");
+        }
+      }
+    }
+    else {
+        messageElement.innerHTML = "⚠️ That address is outside our service area.";
+        buttonElement.setAttribute("href", "#");
+        buttonElement.classList.remove("active");
+    }
+  }
+
+  function generateTimeTapUrl(baseUrl, pickup, dropoff) {
+    const params = new URLSearchParams({
+      CF_PICKUP_ADDRESS: pickup,
+      CF_DROPOFF_ADDRESS: dropoff
+    });
+
+    return `${baseUrl}?${params.toString()}`;
+  }
+
+  function setButtonHref() {
+    const pickupZone = document.getElementById("pickup-field").getAttribute("zone");
+    const pickupAddress = document.getElementById("pickup-field").value;
+    const dropoffAddress = document.getElementById("dropoff-field").value;
+    const useSameLocation = document.getElementById("same-location-toggle").checked;
+    const buttonElement = document.getElementById("schedule-button");
+    if(useSameLocation) {
+      buttonElement.setAttribute("href", generateTimeTapUrl(timetapLinks[pickupZone], pickupAddress, pickupAddress));
+    }
+    else {
+      buttonElement.setAttribute("href", generateTimeTapUrl(timetapLinks[pickupZone], pickupAddress, dropoffAddress));
+    }
+  }
+
+function registerAutocomplete(id) {
+  const input = document.getElementById(id);
+  const errorField = document.getElementById(`${id}-error`);
+  const autocomplete = new google.maps.places.Autocomplete(input, {
+    componentRestrictions: { country: "us" }
+  });
+
+  autocomplete.addListener("place_changed", () => {
+    let valid = true;
+    const place = autocomplete.getPlace();
+    const hasStreet = place.address_components?.some(c => c.types.includes("street_number")) &&
+                  place.address_components?.some(c => c.types.includes("route"));
+    errorField.innerHTML = ""
+    if (!place.geometry || !place.geometry.location) return;
+
+    if(!hasStreet) {
+      errorField.innerHTML = "Please select a POI or address with a full street address."
+      return;
+    }
+    if (place.types.includes("locality") || place.types.includes("political")) {
+      errorField.innerHTML = "Please select a full street address or place with an address, not a city.";
+      return;
+    }
+
+    const location = place.geometry.location;
+    const latLng = new google.maps.LatLng(location.lat(), location.lng());
+
+    const zone = getZone(latLng);
+    input.setAttribute("zone", zone || "");
+
+    if (id === "pickup-field") {
+      pickupLocation = latLng;
+    } else {
+      dropoffLocation = latLng;
+    }
+
+    placeMarker(id, latLng);
+    if (zone) {
+      highlightZone(zone);
+    } else {
+      valid = false;
+    }
+
+    updateMessage(valid);
+  });
+}
+  document.getElementById("same-location-toggle").addEventListener("change", (e) => {
+    const dropoffContainer = document.getElementById("dropoff-container");
+    const dropoffInput = document.getElementById("dropoff-field");
+    const pickupInput = document.getElementById("pickup-field");
+
+    if (e.target.checked) {
+      // Hide dropoff field
+      dropoffContainer.style.display = "none";
+
+      // Copy pickup zone to dropoff
+      dropoffInput.setAttribute("zone", pickupInput.getAttribute("zone") || "");
+      
+      // Update message and button
+      updateMessage();
+    } else {
+      // Show dropoff field
+      dropoffContainer.style.display = "block";
+
+      // Clear previous value
+      dropoffInput.value = "";
+      dropoffInput.setAttribute("zone", "");
+      
+      updateMessage();
+    }
+  });
+
+  document.getElementById("schedule-button").addEventListener("click", function (e) {
+    if (!this.classList.contains("active")) {
+      e.preventDefault(); // Stop the link from doing anything
+      return false;
+    }
+  });
+
+  function initMap() {
+    map = new google.maps.Map(document.getElementById("map"), {
+      center: { lat: 38.1857311294782, lng: -121.4573269246132 }, // default to Sacramento
+      zoom: 8.5,
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false
+    });
+
+    loadZones();
+    registerAutocomplete("pickup-field");
+    registerAutocomplete("dropoff-field");
+  }
+</script>
+
+<script async defer
+  src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC22nL0xaL52HQUdZ1IT3VzNGNxr1xHBgY&libraries=places,geometry&callback=initMap">
+</script>
